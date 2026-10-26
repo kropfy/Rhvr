@@ -1,0 +1,557 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>REALISTIC HOCKEY VR</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #fff;
+            user-select: none;
+        }
+
+        #vr-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: radial-gradient(circle at center, #1a2332 0%, #080c14 100%);
+            z-index: 999;
+        }
+
+        .title-card {
+            text-align: center;
+            margin-bottom: 2rem;
+        }
+
+        .title-card h1 {
+            font-size: 3.5rem;
+            font-weight: 900;
+            letter-spacing: 4px;
+            margin: 0;
+            background: linear-gradient(135deg, #ffffff 0%, #a5c7eb 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 10px 20px rgba(0,0,0,0.5);
+        }
+
+        .title-card p {
+            font-size: 1.2rem;
+            color: #00d2ff;
+            letter-spacing: 2px;
+            margin-top: 0.5rem;
+            font-weight: 600;
+        }
+
+        #enter-vr-btn {
+            padding: 18px 48px;
+            font-size: 1.4rem;
+            font-weight: 800;
+            color: #080c14;
+            background: linear-gradient(135deg, #00d2ff 0%, #0072ff 100%);
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            box-shadow: 0 0 30px rgba(0, 210, 255, 0.4);
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        #enter-vr-btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 50px rgba(0, 210, 255, 0.8);
+        }
+
+        .vr-notice {
+            margin-top: 2rem;
+            font-size: 0.9rem;
+            color: #8a9ba8;
+            max-width: 400px;
+            text-align: center;
+            line-height: 1.5;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+    </style>
+    <!-- Three.js and WebXR Dependencies -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="vr-overlay">
+        <div class="title-card">
+            <h1>REALISTIC HOCKEY VR</h1>
+            <p>STANDALONE WEBXR EXPERIENCE</p>
+        </div>
+        <button id="enter-vr-btn">ENTER VR</button>
+        <div class="vr-notice">
+            Put on your Meta Quest or WebXR headset and click <strong>ENTER VR</strong> to launch directly onto the ice.
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script>
+        // --- Core Variables ---
+        let scene, camera, renderer;
+        let vrControllers = [];
+        let xrSession = null;
+
+        // --- Game Entities ---
+        let puck;
+        let playerStick, stickBlade, stickShaft;
+        let goalieGroup;
+
+        // --- Physics & Interaction State ---
+        const puckRadius = 0.0762; 
+        const puckHeight = 0.0254; 
+        let puckPosition = new THREE.Vector3(0, puckHeight / 2, -2);
+        let puckVelocity = new THREE.Vector3(0, 0, 0);
+        const friction = 0.988;
+
+        // Audio Effects (Synthesized Web Audio API)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+        function playSound(type) {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            const now = audioCtx.currentTime;
+
+            if (type === 'stick-hit') {
+                osc.type = 'triangle';
+                osc.frequency.setValueAtTime(120, now);
+                osc.frequency.exponentialRampToValueAtTime(40, now + 0.08);
+                gain.gain.setValueAtTime(0.8, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+                osc.start(now);
+                osc.stop(now + 0.08);
+            } else if (type === 'goal-horn') {
+                const osc2 = audioCtx.createOscillator();
+                osc2.connect(gain);
+                osc.type = 'sawtooth';
+                osc2.type = 'sawtooth';
+                osc.frequency.setValueAtTime(180, now);
+                osc2.frequency.setValueAtTime(184, now);
+                gain.gain.setValueAtTime(0.4, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 2.0);
+                osc.start(now);
+                osc2.start(now);
+                osc.stop(now + 2.0);
+                osc2.stop(now + 2.0);
+            }
+        }
+
+        // Initialize Scene
+        function init() {
+            const container = document.getElementById('canvas-container');
+
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0e17);
+            scene.fog = new THREE.FogExp2(0x0a0e17, 0.015);
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 1.6, 3);
+
+            // WebXR Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, powerPreference: "high-performance" });
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true;
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            renderer.outputEncoding = THREE.sRGBEncoding;
+            container.appendChild(renderer.domElement);
+
+            // Lighting Setup
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+            scene.add(ambientLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.2);
+            dirLight.position.set(10, 20, 10);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            const spot1 = new THREE.SpotLight(0xd0e8ff, 1.5, 50, Math.PI / 4, 0.5);
+            spot1.position.set(0, 15, 0);
+            scene.add(spot1);
+
+            // Build Environment
+            createLockerRoomHub();
+            createRinkEnvironment();
+            createPuck();
+            createGoalie();
+            setupVRControllers();
+
+            window.addEventListener('resize', onWindowResize);
+
+            if ('xr' in navigator) {
+                navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
+                    if (!supported) {
+                        document.getElementById('enter-vr-btn').innerText = 'VR NOT SUPPORTED ON THIS DEVICE';
+                        document.getElementById('enter-vr-btn').style.opacity = '0.5';
+                    }
+                });
+            }
+
+            document.getElementById('enter-vr-btn').addEventListener('click', requestVRSession);
+        }
+
+        // --- Build Rink Environment ---
+        function createRinkEnvironment() {
+            const rinkGroup = new THREE.Group();
+
+            const iceGeo = new THREE.PlaneGeometry(30, 60);
+            const iceMat = new THREE.MeshPhysicalMaterial({
+                color: 0xf0f8ff,
+                emissive: 0x111a24,
+                roughness: 0.1,
+                metalness: 0.1,
+                clearcoat: 1.0,
+                clearcoatRoughness: 0.1,
+                reflectivity: 0.9
+            });
+            const ice = new THREE.Mesh(iceGeo, iceMat);
+            ice.rotation.x = -Math.PI / 2;
+            ice.receiveShadow = true;
+            rinkGroup.add(ice);
+
+            createRinkMarkings(rinkGroup);
+
+            // Completely White Dasher Boards
+            const boardHeight = 1.2;
+            const boardGeoLength = 60;
+            const boardGeoWidth = 30;
+
+            const whiteBoardMat = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                roughness: 0.3,
+                metalness: 0.05
+            });
+
+            const yellowKickMat = new THREE.MeshBasicMaterial({ color: 0xffd700 });
+            const blueCapMat = new THREE.MeshBasicMaterial({ color: 0x0044ff });
+
+            [-boardGeoWidth / 2, boardGeoWidth / 2].forEach(xPos => {
+                const boardWall = new THREE.Mesh(new THREE.BoxGeometry(0.1, boardHeight, boardGeoLength), whiteBoardMat);
+                boardWall.position.set(xPos, boardHeight / 2, 0);
+                boardWall.castShadow = true;
+                rinkGroup.add(boardWall);
+
+                const kick = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.2, boardGeoLength), yellowKickMat);
+                kick.position.set(xPos, 0.1, 0);
+                rinkGroup.add(kick);
+
+                const cap = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.08, boardGeoLength), blueCapMat);
+                cap.position.set(xPos, boardHeight, 0);
+                rinkGroup.add(cap);
+            });
+
+            [-boardGeoLength / 2, boardGeoLength / 2].forEach(zPos => {
+                const boardWall = new THREE.Mesh(new THREE.BoxGeometry(boardGeoWidth, boardHeight, 0.1), whiteBoardMat);
+                boardWall.position.set(0, boardHeight / 2, zPos);
+                boardWall.castShadow = true;
+                rinkGroup.add(boardWall);
+
+                const kick = new THREE.Mesh(new THREE.BoxGeometry(boardGeoWidth, 0.2, 0.12), yellowKickMat);
+                kick.position.set(0, 0.1, zPos);
+                rinkGroup.add(kick);
+
+                const cap = new THREE.Mesh(new THREE.BoxGeometry(boardGeoWidth, 0.08, 0.14), blueCapMat);
+                cap.position.set(0, boardHeight, zPos);
+                rinkGroup.add(cap);
+            });
+
+            createHockeyGoal(rinkGroup, new THREE.Vector3(0, 0, -22));
+            scene.add(rinkGroup);
+        }
+
+        function createRinkMarkings(parent) {
+            const createLine = (z, color, width) => {
+                const line = new THREE.Mesh(
+                    new THREE.PlaneGeometry(29.8, width),
+                    new THREE.MeshBasicMaterial({ color: color })
+                );
+                line.rotation.x = -Math.PI / 2;
+                line.position.set(0, 0.001, z);
+                parent.add(line);
+            };
+
+            createLine(0, 0xcc0000, 0.3);
+            createLine(-7.5, 0x0033cc, 0.3);
+            createLine(7.5, 0x0033cc, 0.3);
+            createLine(-22, 0xcc0000, 0.1);
+            createLine(22, 0xcc0000, 0.1);
+
+            const circleGeo = new THREE.RingGeometry(4.3, 4.5, 32);
+            const circleMat = new THREE.MeshBasicMaterial({ color: 0x0033cc, side: THREE.DoubleSide });
+            const centerCircle = new THREE.Mesh(circleGeo, circleMat);
+            centerCircle.rotation.x = -Math.PI / 2;
+            centerCircle.position.set(0, 0.001, 0);
+            parent.add(centerCircle);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024;
+            canvas.height = 1024;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#ffffff';
+            ctx.beginPath();
+            ctx.arc(512, 512, 500, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.lineWidth = 20;
+            ctx.strokeStyle = '#0033cc';
+            ctx.stroke();
+
+            ctx.fillStyle = '#0a0e17';
+            ctx.font = '900 72px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('REALISTIC HOCKEY VR', 512, 512);
+
+            const logoTex = new THREE.CanvasTexture(canvas);
+            const logoMesh = new THREE.Mesh(
+                new THREE.CircleGeometry(4.2, 32),
+                new THREE.MeshBasicMaterial({ map: logoTex, transparent: true, opacity: 0.85 })
+            );
+            logoMesh.rotation.x = -Math.PI / 2;
+            logoMesh.position.set(0, 0.002, 0);
+            parent.add(logoMesh);
+        }
+
+        function createHockeyGoal(parent, position) {
+            const goalGroup = new THREE.Group();
+            goalGroup.position.copy(position);
+
+            const redMat = new THREE.MeshStandardMaterial({ color: 0xcc0000, roughness: 0.3, metalness: 0.8 });
+            const netMat = new THREE.MeshBasicMaterial({ color: 0xdddddd, wireframe: true, transparent: true, opacity: 0.4 });
+
+            const postGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.22);
+            const leftPost = new THREE.Mesh(postGeo, redMat);
+            leftPost.position.set(-0.91, 0.61, 0);
+
+            const rightPost = new THREE.Mesh(postGeo, redMat);
+            rightPost.position.set(0.91, 0.61, 0);
+
+            const crossbarGeo = new THREE.CylinderGeometry(0.03, 0.03, 1.83);
+            const crossbar = new THREE.Mesh(crossbarGeo, redMat);
+            crossbar.rotation.z = Math.PI / 2;
+            crossbar.position.set(0, 1.22, 0);
+
+            goalGroup.add(leftPost, rightPost, crossbar);
+
+            const netMesh = new THREE.Mesh(new THREE.BoxGeometry(1.83, 1.22, 0.8), netMat);
+            netMesh.position.set(0, 0.61, -0.4);
+            goalGroup.add(netMesh);
+
+            parent.add(goalGroup);
+        }
+
+        function createLockerRoomHub() {
+            const hubGroup = new THREE.Group();
+            hubGroup.position.set(0, 0, 15);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 1024;
+            canvas.height = 256;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#0d131d';
+            ctx.fillRect(0, 0, 1024, 256);
+            ctx.fillStyle = '#00d2ff';
+            ctx.font = '900 64px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('REALISTIC HOCKEY VR', 512, 128);
+
+            const bannerTex = new THREE.CanvasTexture(canvas);
+            const bannerMesh = new THREE.Mesh(
+                new THREE.PlaneGeometry(8, 2),
+                new THREE.MeshBasicMaterial({ map: bannerTex })
+            );
+            bannerMesh.position.set(0, 3.5, -5);
+            hubGroup.add(bannerMesh);
+
+            scene.add(hubGroup);
+        }
+
+        function createPuck() {
+            const puckGeo = new THREE.CylinderGeometry(puckRadius, puckRadius, puckHeight, 32);
+            const puckMat = new THREE.MeshStandardMaterial({
+                color: 0x111111,
+                roughness: 0.2,
+                metalness: 0.1
+            });
+            puck = new THREE.Mesh(puckGeo, puckMat);
+            puck.position.copy(puckPosition);
+            puck.castShadow = true;
+            puck.receiveShadow = true;
+            scene.add(puck);
+        }
+
+        function createGoalie() {
+            goalieGroup = new THREE.Group();
+            goalieGroup.position.set(0, 0, -21.5);
+
+            const redMat = new THREE.MeshStandardMaterial({ color: 0xdd1111, roughness: 0.4 });
+            const whiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.9, 0.3), redMat);
+            torso.position.y = 0.75;
+
+            const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 16), whiteMat);
+            head.position.y = 1.35;
+
+            const legPadL = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.6, 0.2), redMat);
+            legPadL.position.set(-0.25, 0.3, 0.1);
+
+            const legPadR = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.6, 0.2), redMat);
+            legPadR.position.set(0.25, 0.3, 0.1);
+
+            goalieGroup.add(torso, head, legPadL, legPadR);
+            scene.add(goalieGroup);
+        }
+
+        function setupVRControllers() {
+            for (let i = 0; i < 2; i++) {
+                const controller = renderer.xr.getController(i);
+                scene.add(controller);
+                vrControllers.push(controller);
+
+                if (i === 0) {
+                    createHockeyStick(controller);
+                }
+            }
+        }
+
+        function createHockeyStick(parent) {
+            playerStick = new THREE.Group();
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 512;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = '#111111';
+            ctx.fillRect(0, 0, 512, 64);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 24px sans-serif';
+            ctx.fillText('REALISTIC HOCKEY VR', 30, 40);
+
+            const shaftTex = new THREE.CanvasTexture(canvas);
+            const shaftMat = new THREE.MeshStandardMaterial({ map: shaftTex, roughness: 0.3 });
+
+            const shaftGeo = new THREE.BoxGeometry(0.03, 1.4, 0.02);
+            stickShaft = new THREE.Mesh(shaftGeo, shaftMat);
+            stickShaft.position.set(0, 0, -0.5);
+            stickShaft.rotation.x = -Math.PI / 4;
+            playerStick.add(stickShaft);
+
+            const bladeGeo = new THREE.BoxGeometry(0.015, 0.09, 0.28);
+            const bladeMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.5 });
+            stickBlade = new THREE.Mesh(bladeGeo, bladeMat);
+            stickBlade.position.set(0, -0.65, -0.95);
+            stickBlade.rotation.x = Math.PI / 12;
+            playerStick.add(stickBlade);
+
+            parent.add(playerStick);
+        }
+
+        function requestVRSession() {
+            if (!navigator.xr) return;
+
+            navigator.xr.requestSession('immersive-vr', {
+                optionalFeatures: ['local-floor', 'bounded-floor']
+            }).then(onVRSessionStarted).catch((err) => {
+                console.error("Failed to start VR Session:", err);
+            });
+        }
+
+        function onVRSessionStarted(session) {
+            xrSession = session;
+            document.getElementById('vr-overlay').style.display = 'none';
+
+            renderer.xr.setSession(session);
+
+            session.addEventListener('end', () => {
+                xrSession = null;
+                document.getElementById('vr-overlay').style.display = 'flex';
+            });
+
+            renderer.setAnimationLoop(renderLoop);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function renderLoop(timestamp, frame) {
+            if (frame) {
+                updatePhysics();
+            }
+            renderer.render(scene, camera);
+        }
+
+        function updatePhysics() {
+            puckPosition.add(puckVelocity);
+            puckVelocity.x *= friction;
+            puckVelocity.z *= friction;
+
+            puckPosition.y = puckHeight / 2;
+
+            if (Math.abs(puckPosition.x) > 14.5) {
+                puckVelocity.x *= -0.75;
+                puckPosition.x = Math.sign(puckPosition.x) * 14.5;
+                playSound('stick-hit');
+            }
+            if (Math.abs(puckPosition.z) > 29.0) {
+                puckVelocity.z *= -0.75;
+                puckPosition.z = Math.sign(puckPosition.z) * 29.0;
+                playSound('stick-hit');
+            }
+
+            puck.position.copy(puckPosition);
+
+            if (stickBlade) {
+                const bladeWorldPos = new THREE.Vector3();
+                stickBlade.getWorldPosition(bladeWorldPos);
+
+                const dist = bladeWorldPos.distanceTo(puckPosition);
+                if (dist < 0.25) {
+                    puckVelocity.z = -0.3;
+                    puckVelocity.x += (Math.random() - 0.5) * 0.1;
+                    playSound('stick-hit');
+                }
+            }
+
+            if (puckPosition.z < -22.0 && Math.abs(puckPosition.x) < 0.9) {
+                playSound('goal-horn');
+                puckPosition.set(0, puckHeight / 2, -2);
+                puckVelocity.set(0, 0, 0);
+            }
+        }
+
+        window.onload = init;
+    </script>
+</body>
+</html>
